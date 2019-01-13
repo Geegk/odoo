@@ -504,6 +504,9 @@ class AccountInvoice(models.Model):
 
     @api.model
     def create(self, vals):
+        if not vals.get('journal_id') and vals.get('type'):
+            vals['journal_id'] = self.with_context(type=vals.get('type'))._default_journal().id
+
         onchanges = {
             '_onchange_partner_id': ['account_id', 'payment_term_id', 'fiscal_position_id', 'partner_bank_id'],
             '_onchange_journal_id': ['currency_id'],
@@ -989,6 +992,7 @@ class AccountInvoice(models.Model):
     @api.multi
     def get_taxes_values(self):
         tax_grouped = {}
+        round_curr = self.currency_id.round
         for line in self.invoice_line_ids:
             if not line.account_id:
                 continue
@@ -1000,9 +1004,10 @@ class AccountInvoice(models.Model):
 
                 if key not in tax_grouped:
                     tax_grouped[key] = val
+                    tax_grouped[key]['base'] = round_curr(val['base'])
                 else:
                     tax_grouped[key]['amount'] += val['amount']
-                    tax_grouped[key]['base'] += val['base']
+                    tax_grouped[key]['base'] += round_curr(val['base'])
         return tax_grouped
 
     @api.multi
@@ -1451,9 +1456,11 @@ class AccountInvoice(models.Model):
             values = self._prepare_refund(invoice, date_invoice=date_invoice, date=date,
                                     description=description, journal_id=journal_id)
             refund_invoice = self.create(values)
-            invoice_type = {'out_invoice': ('customer invoices credit note'),
-                'in_invoice': ('vendor bill credit note')}
-            message = _("This %s has been created from: <a href=# data-oe-model=account.invoice data-oe-id=%d>%s</a><br>Reason: %s") % (invoice_type[invoice.type], invoice.id, invoice.number, description)
+            if invoice.type == 'out_invoice':
+                message = _("This customer invoice credit note has been created from: <a href=# data-oe-model=account.invoice data-oe-id=%d>%s</a><br>Reason: %s") % (invoice.id, invoice.number, description)
+            else:
+                message = _("This vendor bill credit note has been created from: <a href=# data-oe-model=account.invoice data-oe-id=%d>%s</a><br>Reason: %s") % (invoice.id, invoice.number, description)
+
             refund_invoice.message_post(body=message)
             new_invoices += refund_invoice
         return new_invoices
@@ -1707,17 +1714,17 @@ class AccountInvoiceLine(models.Model):
                 self.price_unit = 0.0
             domain['uom_id'] = []
         else:
+            self_lang = self
             if part.lang:
-                product = self.product_id.with_context(lang=part.lang)
-            else:
-                product = self.product_id
-
+                self_lang = self.with_context(lang=part.lang)
+   
+            product = self_lang.product_id
             account = self.get_invoice_line_account(type, product, fpos, company)
             if account:
                 self.account_id = account.id
             self._set_taxes()
 
-            product_name = self._get_invoice_line_name_from_product()
+            product_name = self_lang._get_invoice_line_name_from_product()
             if product_name != None:
                 self.name = product_name
 
@@ -1774,6 +1781,7 @@ class AccountInvoiceLine(models.Model):
             else:
                 price_unit = self.product_id.lst_price
             self.price_unit = self.product_id.uom_id._compute_price(price_unit, self.uom_id)
+            self._set_currency()
 
             if self.product_id.uom_id.category_id.id != self.uom_id.category_id.id:
                 warning = {
